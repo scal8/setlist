@@ -5,6 +5,7 @@ const SPOTIFY_CLIENT_ID = '064f25fda20d4eb2bb0c78f1305f5469';
 const REDIRECT_URI = 'http://127.0.0.1:3000';
 const SCOPES = 'user-read-private playlist-read-private playlist-read-collaborative';
 const GETSONGBPM_API_KEY = 'cd5cf88f35e7296383bbeb1fc9961737';
+const RAPIDAPI_KEY = 'fd3e7696d3mshb9d1c59341a85f6p1314a9jsn606dbb41fa43';
 
 /* ─── PKCE Helpers ─── */
 function generateRandomString(length) {
@@ -1129,6 +1130,63 @@ export default function App() {
 
       // Small delay to respect rate limits (3000/hour = ~1.2/sec)
       await new Promise(r => setTimeout(r, 350));
+    }
+
+    // Fallback: Use RapidAPI for any tracks still missing BPM
+    const stillNeedBpm = tracks.filter(t => t.bpm === null);
+    if (stillNeedBpm.length > 0) {
+      console.log(`RapidAPI fallback for ${stillNeedBpm.length} tracks missing BPM`);
+      
+      // Try batch first (1 API call for all tracks)
+      try {
+        const ids = stillNeedBpm.map(t => t.id).join(',');
+        const batchResp = await fetch(`/rapid-api/v1/audio-features/?ids=${ids}`);
+        if (batchResp.ok) {
+          const data = await batchResp.json();
+          console.log('RapidAPI batch response:', JSON.stringify(data).substring(0, 500));
+          const features = data.audio_features || data;
+          if (Array.isArray(features)) {
+            features.forEach(feat => {
+              if (feat && feat.tempo && feat.id) {
+                const track = stillNeedBpm.find(t => t.id === feat.id);
+                if (track) {
+                  track.bpm = Math.round(feat.tempo);
+                  const cacheKey = `${track.artist}::${track.name}`.toLowerCase();
+                  bpmCache.current[cacheKey] = track.bpm;
+                  console.log('RapidAPI BPM:', track.name, '→', track.bpm);
+                }
+              }
+            });
+          }
+        } else {
+          console.warn('RapidAPI batch returned:', batchResp.status, '— trying individual lookups');
+          // Fall back to individual lookups
+          for (const track of stillNeedBpm) {
+            try {
+              const resp = await fetch(`/rapid-api/v1/audio-features/${track.id}`);
+              if (resp.ok) {
+                const feat = await resp.json();
+                console.log('RapidAPI individual:', track.name, JSON.stringify(feat).substring(0, 200));
+                if (feat && feat.tempo) {
+                  track.bpm = Math.round(feat.tempo);
+                  const cacheKey = `${track.artist}::${track.name}`.toLowerCase();
+                  bpmCache.current[cacheKey] = track.bpm;
+                  console.log('RapidAPI BPM:', track.name, '→', track.bpm);
+                }
+              } else {
+                console.warn('RapidAPI individual returned:', resp.status, 'for', track.name);
+                break; // Stop if we're getting errors (save API quota)
+              }
+            } catch (e) {
+              console.warn('RapidAPI individual failed:', track.name, e);
+              break;
+            }
+            await new Promise(r => setTimeout(r, 200));
+          }
+        }
+      } catch (e) {
+        console.warn('RapidAPI fallback failed:', e);
+      }
     }
   };
 
